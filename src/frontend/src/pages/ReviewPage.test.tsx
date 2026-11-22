@@ -277,6 +277,7 @@ describe("ReviewPage", () => {
   it("switches to the cross-check pane", async () => {
     vi.mocked(api.getConsistency).mockResolvedValue({
       run: { id: 1, status: "DONE", error: null, finding_count: 0, created_at: "2026-11-23T08:00:00Z" },
+      stale: false,
       findings: [],
       counts: { error: 0, warning: 0 },
     });

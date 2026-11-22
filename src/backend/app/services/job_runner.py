@@ -227,6 +227,9 @@ async def run_process_job(job_id: int, llm: LLMClient) -> bool:
                 log.exception("resolution failed for shipment %s", shipment_id)
                 await session.rollback()
                 resolution_error = f"RESOLUTION_FAILED: {exc}"
+            # Commit resolution first: the consistency check below may roll back on
+            # failure, and that rollback must never discard resolved values.
+            await session.commit()
             try:
                 # Cross-document check only warns. Its failure is logged and stored on
                 # its own run row, never added to job.error or allowed to fail the job.

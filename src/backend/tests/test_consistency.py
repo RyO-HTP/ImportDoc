@@ -200,3 +200,58 @@ def test_build_batches_keeps_header_in_every_batch():
         assert {f.id for f in header} <= {f.id for f in batch}
         assert len(batch) <= 4
     assert sorted(f.id for b in batches for f in b if f.line_seq is not None) == sorted(f.id for f in lines)
+
+
+async def test_no_open_transaction_while_waiting_for_llm(db_session):
+    """Review: a write lock held across the LLM call blocks every other SQLite writer."""
+    s = await _seed(db_session)
+    seen: list[bool] = []
+
+    class SpyLLM(StubLLM):
+        async def complete_json_validated(self, *args, **kwargs):
+            seen.append(db_session.in_transaction())
+            return await super().complete_json_validated(*args, **kwargs)
+
+    await run_consistency_check(db_session, SpyLLM(), s.sid)
+    assert seen == [False]
+
+
+def test_build_batches_keeps_same_line_of_every_document_together():
+    """Review: batching by document meant invoice and packing-list lines were never compared."""
+    header = [_cf(1, 1, None), _cf(2, 2, None)]
+    lines = [_cf(100 + doc * 10 + n * 2 + k, doc, n) for doc in (1, 2) for n in range(3) for k in range(2)]
+    batches = build_batches(sorted(header + lines, key=lambda f: (f.document_id, f.line_seq or -1, f.id)), max_fields=6)
+    assert len(batches) > 1
+    for batch in batches:
+        by_seq: dict[int, set[int]] = {}
+        for f in batch:
+            if f.line_seq is not None:
+                by_seq.setdefault(f.line_seq, set()).add(f.document_id)
+        assert all(docs == {1, 2} for docs in by_seq.values()), by_seq
+
+
+async def test_report_is_stale_after_document_is_superseded_without_rerun(db_session):
+    """Review: resolve-duplicate supersedes a document without re-running the check."""
+    s = await _seed(db_session)
+    third = await _doc(db_session, s.sid, "COMMERCIAL_INVOICE", "invoice.pdf")
+    await _field(db_session, third, "transport.gross_weight_kg", "26400")
+    await db_session.commit()
+    llm = StubLLM({"findings": [_finding(s.f1.id, s.f2.id)]})
+    await run_consistency_check(db_session, llm, s.sid)
+    assert (await consistency_report(db_session, s.sid))["stale"] is False
+    s.bl.status = "SUPERSEDED_BY"
+    await db_session.commit()
+    report = await consistency_report(db_session, s.sid)
+    assert report["stale"] is True
+
+
+async def test_findings_citing_removed_fields_are_not_shown_or_counted(db_session):
+    """Review: re-extraction deletes field rows; a failed rerun kept showing and counting them."""
+    s = await _seed(db_session)
+    llm = StubLLM({"findings": [_finding(s.f1.id, s.f2.id)]})
+    await run_consistency_check(db_session, llm, s.sid)
+    await db_session.delete(s.f2)
+    await db_session.commit()
+    report = await consistency_report(db_session, s.sid)
+    assert report["findings"] == []
+    assert report["counts"] == {"error": 0, "warning": 0}

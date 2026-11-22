@@ -59,6 +59,11 @@ export default function ConsistencyPanel({
             {runMutation.error.message}
           </Callout>
         ) : null}
+        {report?.stale && report.run?.status !== "FAILED" ? (
+          <Callout tone="info" title="Chứng từ đã thay đổi sau lần kiểm tra gần nhất">
+            Kết quả bên dưới có thể đã cũ. Bấm “Kiểm tra lại” để đối chiếu lại.
+          </Callout>
+        ) : null}
         {report?.run?.status === "FAILED" ? (
           <Callout tone="warning" title="Lần kiểm tra gần nhất thất bại">
             {report.run.error ?? "Không rõ lỗi."} Kết quả bên dưới (nếu có) là của lần kiểm tra trước.

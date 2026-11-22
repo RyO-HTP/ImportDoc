@@ -19,6 +19,7 @@ const dismissFinding = vi.mocked(api.dismissFinding);
 
 const report: ConsistencyReport = {
   run: { id: 1, status: "DONE", error: null, finding_count: 1, created_at: "2026-11-23T08:00:00Z" },
+  stale: false,
   counts: { error: 1, warning: 0 },
   findings: [
     {
@@ -104,5 +105,11 @@ describe("ConsistencyPanel", () => {
     getConsistency.mockResolvedValue({ ...report, findings: [], counts: { error: 0, warning: 0 } });
     renderPanel();
     expect(await screen.findByText("Không phát hiện thông tin lệch giữa các chứng từ")).toBeTruthy();
+  });
+
+  it("tells the reviewer to re-run when the documents changed since the last check", async () => {
+    getConsistency.mockResolvedValue({ ...report, stale: true });
+    renderPanel();
+    expect(await screen.findByText(/Chứng từ đã thay đổi sau lần kiểm tra gần nhất/)).toBeTruthy();
   });
 });

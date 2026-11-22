@@ -126,7 +126,7 @@ describe("ExportPage", () => {
       },
     ]);
     listExports.mockResolvedValue([]);
-    vi.mocked(api.getConsistency).mockResolvedValue({ run: null, findings: [], counts: { error: 0, warning: 0 } });
+    vi.mocked(api.getConsistency).mockResolvedValue({ run: null, stale: false, findings: [], counts: { error: 0, warning: 0 } });
     getExtractions.mockResolvedValue(extractions);
     templatePreview.mockResolvedValue({
       version: "tokhai_import_v1",
@@ -245,6 +245,7 @@ describe("ExportPage", () => {
   it("warns about unresolved cross-check findings but keeps export enabled", async () => {
     vi.mocked(api.getConsistency).mockResolvedValue({
       run: { id: 1, status: "DONE", error: null, finding_count: 1, created_at: "2026-11-23T08:00:00Z" },
+      stale: false,
       findings: [],
       counts: { error: 1, warning: 0 },
     });

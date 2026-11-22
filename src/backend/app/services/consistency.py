@@ -104,15 +104,17 @@ def input_hash(fields: list[CheckField]) -> str:
 
 def build_batches(fields: list[CheckField], max_fields: int = DEFAULT_BATCH_FIELDS) -> list[list[CheckField]]:
     header = [f for f in fields if f.line_seq is None]
-    groups: dict[tuple[int, int], list[CheckField]] = {}
+    # Group by line number across documents, so line N of the invoice and line N of
+    # the packing list always land in the same batch and can be compared.
+    groups: dict[int, list[CheckField]] = {}
     for f in fields:
         if f.line_seq is not None:
-            groups.setdefault((f.document_id, f.line_seq), []).append(f)
+            groups.setdefault(f.line_seq, []).append(f)
     if not groups:
         return [header] if header else []
     batches: list[list[CheckField]] = []
     current: list[CheckField] = []
-    for group in groups.values():
+    for _, group in sorted(groups.items()):
         if current and len(header) + len(current) + len(group) > max_fields:
             batches.append(header + current)
             current = []
@@ -205,25 +207,28 @@ async def _replace_findings(session: AsyncSession, run: ConsistencyRun, findings
 
 
 async def run_consistency_check(session: AsyncSession, llm, shipment_id: int, force: bool = False) -> ConsistencyRun:
+    # Nothing is written before the model answers: an open SQLite write transaction
+    # would block every other writer (worker, review edits) for the whole LLM call.
     fields = await collect_fields(session, shipment_id)
     digest = input_hash(fields)
     if not force:
-        last_done = await _latest_run(session, shipment_id, "DONE")
         latest = await _latest_run(session, shipment_id)
-        if last_done is not None and latest is last_done and last_done.input_hash == digest:
-            return last_done
-
-    run = ConsistencyRun(shipment_id=shipment_id, status="DONE", input_hash=digest)
-    session.add(run)
-    await session.flush()
+        if latest is not None and latest.status == "DONE" and latest.input_hash == digest:
+            return latest
 
     if len({f.document_id for f in fields}) < 2:
+        run = ConsistencyRun(shipment_id=shipment_id, status="DONE", input_hash=digest)
+        session.add(run)
+        await session.flush()
         await _replace_findings(session, run, [])
         await session.commit()
         return run
 
+    # End the read transaction too, so the later write does not upgrade a stale snapshot.
+    await session.commit()
     fields_by_id = {f.id: f for f in fields}
     collected: list[FindingOut] = []
+    run = ConsistencyRun(shipment_id=shipment_id, status="DONE", input_hash=digest)
     try:
         for batch in build_batches(fields):
             result: ConsistencyOut = await llm.complete_json_validated(
@@ -238,9 +243,12 @@ async def run_consistency_check(session: AsyncSession, llm, shipment_id: int, fo
         log.warning("consistency check failed for shipment %s: %s", shipment_id, exc)
         run.status = "FAILED"
         run.error = str(exc)
+        session.add(run)
         await session.commit()
         return run
 
+    session.add(run)
+    await session.flush()
     await _replace_findings(session, run, ground_findings(collected, fields_by_id))
     await session.commit()
     return run
@@ -264,7 +272,9 @@ async def consistency_report(session: AsyncSession, shipment_id: int) -> dict:
         await session.execute(select(ConsistencyFinding).where(ConsistencyFinding.shipment_id == shipment_id))
     ).scalars().all()
     rows = sorted(rows, key=lambda r: (SEVERITY_ORDER.get(r.severity, 9), r.id))
-    ids = {i for r in rows for i in (r.field_ids or [])}
+    current = await collect_fields(session, shipment_id)
+    active_ids = {f.id for f in current}
+    ids = {i for r in rows for i in (r.field_ids or []) if i in active_ids}
     fields: dict[int, tuple[ExtractedField, Document]] = {}
     if ids:
         for field, doc in (
@@ -299,6 +309,10 @@ async def consistency_report(session: AsyncSession, shipment_id: int) -> dict:
                 }
             )
         values.sort(key=lambda v: (v["document_id"], v["field_id"]))
+        # A finding whose fields were deleted (re-extraction) or whose document was
+        # superseded no longer compares two documents: it is not shown or counted.
+        if len({v["document_id"] for v in values}) < 2:
+            continue
         if not r.dismissed:
             counts["error" if r.severity == "ERROR" else "warning"] += 1
         findings.append(
@@ -313,7 +327,8 @@ async def consistency_report(session: AsyncSession, shipment_id: int) -> dict:
                 "values": values,
             }
         )
-    return {"run": _run_dict(run), "findings": findings, "counts": counts}
+    stale = run is not None and run.input_hash != input_hash(current)
+    return {"run": _run_dict(run), "stale": stale, "findings": findings, "counts": counts}
 
 
 async def dismiss_finding(session: AsyncSession, finding: ConsistencyFinding, note: str | None) -> None:

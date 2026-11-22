@@ -71,7 +71,7 @@ async def test_get_consistency_empty_shipment_returns_null_run(ctx):
     sid = (await client.post("/api/v1/shipments", json={"code": "EMPTY"})).json()["id"]
     r = await client.get(f"/api/v1/shipments/{sid}/consistency")
     assert r.status_code == 200
-    assert r.json() == {"run": None, "findings": [], "counts": {"error": 0, "warning": 0}}
+    assert r.json() == {"run": None, "stale": False, "findings": [], "counts": {"error": 0, "warning": 0}}
 
 
 async def test_run_then_dismiss(ctx):

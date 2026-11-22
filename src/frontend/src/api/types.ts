@@ -224,6 +224,8 @@ export interface ConsistencyRunInfo {
 
 export interface ConsistencyReport {
   run: ConsistencyRunInfo | null;
+  /** Documents or values changed since the last run: findings may be out of date. */
+  stale: boolean;
   findings: ConsistencyFinding[];
   counts: { error: number; warning: number };
 }
