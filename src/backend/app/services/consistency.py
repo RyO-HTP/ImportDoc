@@ -17,7 +17,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
@@ -57,6 +57,40 @@ class FindingOut(BaseModel):
 
 class ConsistencyOut(BaseModel):
     findings: list[FindingOut] = Field(default_factory=list)
+
+
+def parse_consistency(raw: Any) -> ConsistencyOut:
+    """Lenient validator: one malformed item is skipped instead of failing the run.
+
+    Only a response without a `findings` list is rejected (and retried by the client).
+    """
+    if not isinstance(raw, dict) or not isinstance(raw.get("findings"), list):
+        raise ValueError('response must be an object with a "findings" list')
+    out: list[FindingOut] = []
+    for item in raw["findings"]:
+        if not isinstance(item, dict):
+            continue
+        ids = item.get("field_ids")
+        if not isinstance(ids, list):
+            continue
+        try:
+            field_ids = [int(i) for i in ids]
+        except (TypeError, ValueError):
+            continue
+        title = str(item.get("title") or "").strip()
+        if not title or not field_ids:
+            continue
+        severity = str(item.get("severity") or "").strip().upper()
+        out.append(
+            FindingOut(
+                severity=severity if severity in SEVERITY_ORDER else "WARNING",
+                category=str(item.get("category") or "other").strip().lower() or "other",
+                title=title,
+                explanation=str(item.get("explanation") or "").strip(),
+                field_ids=field_ids,
+            )
+        )
+    return ConsistencyOut(findings=out)
 
 
 async def collect_fields(session: AsyncSession, shipment_id: int) -> list[CheckField]:
@@ -127,6 +161,9 @@ def build_batches(fields: list[CheckField], max_fields: int = DEFAULT_BATCH_FIEL
 def ground_findings(findings: list[FindingOut], fields_by_id: dict[int, CheckField]) -> list[FindingOut]:
     out: list[FindingOut] = []
     seen: set[tuple[int, ...]] = set()
+    # Header fields are repeated in every batch, so the same header mismatch can come
+    # back from several batches with different id subsets: merge them by field keys.
+    header_index: dict[frozenset[str], int] = {}
     for finding in findings:
         ids = tuple(sorted(set(finding.field_ids)))
         if not ids or any(i not in fields_by_id for i in ids):
@@ -136,8 +173,29 @@ def ground_findings(findings: list[FindingOut], fields_by_id: dict[int, CheckFie
         if ids in seen:
             continue
         seen.add(ids)
+        if all(fields_by_id[i].line_seq is None for i in ids):
+            keys = frozenset(fields_by_id[i].field_key for i in ids)
+            if keys in header_index:
+                pos = header_index[keys]
+                prior = out[pos]
+                merged = sorted(set(prior.field_ids) | set(ids))
+                severity = min(prior.severity, finding.severity, key=lambda v: SEVERITY_ORDER[v])
+                out[pos] = prior.model_copy(update={"field_ids": merged, "severity": severity})
+                continue
+            header_index[keys] = len(out)
         out.append(finding.model_copy(update={"field_ids": list(ids)}))
     return out
+
+
+def finding_signature(field_ids: list[int], fields_by_id: dict[int, CheckField]) -> list[list]:
+    return sorted(
+        ([f.document_id, f.field_key, f.line_seq] for f in (fields_by_id[i] for i in field_ids)),
+        key=lambda row: (row[0], row[1], -1 if row[2] is None else row[2]),
+    )
+
+
+def _dismiss_key(signature: Any, field_ids: Any) -> str:
+    return json.dumps(signature if signature else ["ids", sorted(field_ids or [])], ensure_ascii=False)
 
 
 def _prompt(batch: list[CheckField]) -> str:
@@ -181,14 +239,26 @@ async def _latest_run(session: AsyncSession, shipment_id: int, status: str | Non
     return (await session.execute(stmt.order_by(ConsistencyRun.id.desc()).limit(1))).scalar_one_or_none()
 
 
-async def _replace_findings(session: AsyncSession, run: ConsistencyRun, findings: list[FindingOut]) -> None:
+async def _replace_findings(
+    session: AsyncSession,
+    run: ConsistencyRun,
+    findings: list[FindingOut],
+    fields_by_id: dict[int, CheckField] | None = None,
+) -> None:
     old = (
         await session.execute(select(ConsistencyFinding).where(ConsistencyFinding.shipment_id == run.shipment_id))
     ).scalars().all()
-    dismissed = {tuple(r.field_ids or []): r for r in old if r.dismissed}
+    dismissed: dict[str, ConsistencyFinding] = {}
+    for r in old:
+        if r.dismissed:
+            dismissed[_dismiss_key(r.signature, r.field_ids)] = r
+            dismissed.setdefault(_dismiss_key(None, r.field_ids), r)
     await session.execute(delete(ConsistencyFinding).where(ConsistencyFinding.shipment_id == run.shipment_id))
     for finding in findings:
-        prior = dismissed.get(tuple(finding.field_ids))
+        signature = finding_signature(finding.field_ids, fields_by_id) if fields_by_id else None
+        prior = dismissed.get(_dismiss_key(signature, finding.field_ids)) or dismissed.get(
+            _dismiss_key(None, finding.field_ids)
+        )
         session.add(
             ConsistencyFinding(
                 run_id=run.id,
@@ -198,6 +268,7 @@ async def _replace_findings(session: AsyncSession, run: ConsistencyRun, findings
                 title=finding.title[:512],
                 explanation=finding.explanation,
                 field_ids=finding.field_ids,
+                signature=signature,
                 dismissed=prior is not None,
                 dismiss_note=prior.dismiss_note if prior else None,
                 dismissed_at=prior.dismissed_at if prior else None,
@@ -235,7 +306,7 @@ async def run_consistency_check(session: AsyncSession, llm, shipment_id: int, fo
                 _prompt(batch),
                 "consistency_check",
                 ConsistencyOut.model_json_schema(),
-                ConsistencyOut.model_validate,
+                parse_consistency,
                 model_override=llm.settings.text_model,
             )
             collected.extend(result.findings)
@@ -249,7 +320,7 @@ async def run_consistency_check(session: AsyncSession, llm, shipment_id: int, fo
 
     session.add(run)
     await session.flush()
-    await _replace_findings(session, run, ground_findings(collected, fields_by_id))
+    await _replace_findings(session, run, ground_findings(collected, fields_by_id), fields_by_id)
     await session.commit()
     return run
 

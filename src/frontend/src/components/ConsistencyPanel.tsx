@@ -108,7 +108,7 @@ function FindingCard({
   return (
     <article
       className={`rounded-md border px-3 py-2 ${
-        finding.dismissed ? "border-hairline opacity-60" : isError ? "border-[#f1ccc8]" : "border-[#efdfba]"
+        finding.dismissed ? "border-hairline opacity-60" : isError ? "border-critical-line" : "border-warning-line"
       }`}
     >
       <div className="flex items-start justify-between gap-2">
@@ -130,7 +130,8 @@ function FindingCard({
             type="button"
             onClick={onDismiss}
             disabled={dismissing}
-            className="type-fine-print shrink-0 rounded-full border border-hairline px-2 py-0.5 text-ink-48 active:scale-95 disabled:opacity-40"
+            aria-label={`Bỏ qua: ${finding.title}`}
+            className="type-fine-print shrink-0 rounded-full border border-hairline px-2 py-0.5 text-ink-48 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-action active:scale-95 disabled:opacity-40"
           >
             Bỏ qua
           </button>
@@ -143,7 +144,7 @@ function FindingCard({
               type="button"
               onClick={() => onValueClick(value)}
               title="Bấm để xem nguồn"
-              className="type-caption flex w-full items-baseline justify-between gap-3 rounded-sm px-2 py-1 text-left hover:bg-pearl"
+              className="type-caption flex w-full items-baseline justify-between gap-3 rounded-sm px-2 py-1 text-left hover:bg-pearl focus-visible:bg-pearl focus-visible:outline-2 focus-visible:outline-action"
             >
               <span className="min-w-0 truncate text-ink-48">
                 {value.filename}

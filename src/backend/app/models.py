@@ -529,6 +529,9 @@ class ConsistencyFinding(Base):
     title: Mapped[str] = mapped_column(String(512))
     explanation: Mapped[str] = mapped_column(Text, default="")
     field_ids: Mapped[Any] = mapped_column(JSON)
+    # [[document_id, field_key, line_seq], ...]: survives re-extraction (new field ids),
+    # so a dismissal follows the content rather than the row ids.
+    signature: Mapped[Any | None] = mapped_column(JSON)
     dismissed: Mapped[bool] = mapped_column(default=False)
     dismiss_note: Mapped[str | None] = mapped_column(Text)
     dismissed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

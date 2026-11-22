@@ -90,7 +90,7 @@ describe("ConsistencyPanel", () => {
     };
     dismissFinding.mockResolvedValue(dismissed);
     renderPanel();
-    fireEvent.click(await screen.findByRole("button", { name: "Bỏ qua" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Bỏ qua: Gross lệch" }));
     await waitFor(() => expect(dismissFinding).toHaveBeenCalledWith(7, undefined));
     expect(await screen.findByText("Đã bỏ qua")).toBeTruthy();
   });

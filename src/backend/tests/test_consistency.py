@@ -26,7 +26,10 @@ class StubLLM:
         self.calls.append(prompt)
         if self.error is not None:
             raise self.error
-        return validator(self.response)
+        try:
+            return validator(self.response)
+        except Exception as exc:  # the real client retries, then raises LLMError
+            raise LLMError(f"JSON không vượt qua kiểm tra schema: {exc}") from exc
 
 
 async def _doc(session, shipment_id: int, doc_type: str, filename: str, status: str = "EXTRACTED") -> Document:
@@ -255,3 +258,67 @@ async def test_findings_citing_removed_fields_are_not_shown_or_counted(db_sessio
     report = await consistency_report(db_session, s.sid)
     assert report["findings"] == []
     assert report["counts"] == {"error": 0, "warning": 0}
+
+
+async def test_one_malformed_item_does_not_fail_the_run(db_session):
+    s = await _seed(db_session)
+    llm = StubLLM(
+        {
+            "findings": [
+                {"severity": "error", "category": "weight", "title": "Gross lệch", "explanation": None,
+                 "field_ids": [s.f1.id, s.f2.id]},
+                {"severity": "CRITICAL?", "title": None, "field_ids": "abc"},
+                "not an object",
+            ]
+        }
+    )
+    run = await run_consistency_check(db_session, llm, s.sid)
+    assert run.status == "DONE"
+    assert run.finding_count == 1
+    finding = (await consistency_report(db_session, s.sid))["findings"][0]
+    assert finding["severity"] == "ERROR"
+    assert finding["explanation"] == ""
+
+
+async def test_missing_findings_list_still_fails_the_run(db_session):
+    s = await _seed(db_session)
+    run = await run_consistency_check(db_session, StubLLM({"result": "ok"}), s.sid)
+    assert run.status == "FAILED"
+
+
+def test_header_finding_repeated_across_batches_is_merged():
+    from app.services.consistency import FindingOut, ground_findings
+
+    fields = {
+        1: CheckField(1, 1, "pl", "PACKING_LIST", 1, "transport.gross_weight_kg", "26400", None),
+        2: CheckField(2, 2, "bl", "TRANSPORT_DOCUMENT", 1, "transport.gross_weight_kg", "26040", None),
+        3: CheckField(3, 3, "inv", "COMMERCIAL_INVOICE", 1, "transport.gross_weight_kg", "26400", None),
+    }
+    a = FindingOut(severity="WARNING", category="weight", title="A", field_ids=[1, 2])
+    b = FindingOut(severity="ERROR", category="weight", title="B", field_ids=[2, 3])
+    out = ground_findings([a, b], fields)
+    assert len(out) == 1
+    assert out[0].field_ids == [1, 2, 3]
+    assert out[0].severity == "ERROR"
+
+
+async def test_dismissal_survives_reextraction(db_session):
+    """Re-extraction recreates field rows with new ids; a dismissal must follow the content."""
+    from app.models import ConsistencyFinding
+    from sqlalchemy import select
+
+    s = await _seed(db_session)
+    llm = StubLLM({"findings": [_finding(s.f1.id, s.f2.id)]})
+    await run_consistency_check(db_session, llm, s.sid)
+    row = (await db_session.execute(select(ConsistencyFinding))).scalar_one()
+    row.dismissed = True
+    row.dismiss_note = "đã kiểm tra"
+    await db_session.delete(s.f1)
+    await db_session.flush()
+    new_f1 = await _field(db_session, s.pl, "transport.gross_weight_kg", "26400")
+    await db_session.commit()
+    llm.response = {"findings": [_finding(new_f1.id, s.f2.id)]}
+    await run_consistency_check(db_session, llm, s.sid)
+    finding = (await consistency_report(db_session, s.sid))["findings"][0]
+    assert finding["dismissed"] is True
+    assert finding["dismiss_note"] == "đã kiểm tra"
