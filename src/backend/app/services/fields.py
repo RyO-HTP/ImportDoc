@@ -12,7 +12,7 @@ class FieldSpec:
     enum: tuple[str, ...] | None = None
 
 
-PARTY_ROLES = ("SELLER", "BUYER", "SHIPPER", "CONSIGNEE", "NOTIFY", "ISSUER", "INSPECTOR")
+PARTY_ROLES = ("SELLER", "BUYER", "SHIPPER", "CONSIGNEE", "NOTIFY", "EXPORTER", "IMPORTER", "PRODUCER", "ISSUER", "INSPECTOR")
 
 COMMON_FIELDS = (
     FieldSpec("document.doc_number", "Số chứng từ", "text", critical=True),
@@ -20,9 +20,28 @@ COMMON_FIELDS = (
     FieldSpec("document.issuer", "Bên phát hành", "text"),
 )
 
+REFERENCE_FIELDS = (
+    FieldSpec("reference.invoice_no", "Số hóa đơn tham chiếu", "text"),
+    FieldSpec("reference.invoice_date", "Ngày hóa đơn tham chiếu", "date"),
+    FieldSpec("reference.contract_no", "Số hợp đồng tham chiếu", "text"),
+    FieldSpec("reference.origin_no", "Số C/O tham chiếu", "text"),
+    FieldSpec("reference.po_no", "Số đơn đặt hàng", "text"),
+)
+
 TRANSPORT_FIELDS = (
     FieldSpec("transport.vessel", "Tàu", "text", critical=True),
     FieldSpec("transport.voyage", "Chuyến", "text"),
+    FieldSpec("transport.master_waybill_no", "Số vận đơn chủ (MBL)", "text"),
+    FieldSpec("transport.house_waybill_no", "Số vận đơn thứ cấp (HBL)", "text"),
+    FieldSpec("transport.booking_no", "Số booking", "text"),
+    FieldSpec("transport.loading_port", "Cảng xếp hàng", "text"),
+    FieldSpec("transport.discharge_port", "Cảng dỡ hàng", "text"),
+    FieldSpec("transport.receipt_place", "Nơi nhận hàng", "text"),
+    FieldSpec("transport.delivery_place", "Nơi giao hàng", "text"),
+    FieldSpec("transport.on_board_date", "Ngày xếp hàng lên tàu", "date"),
+    FieldSpec("transport.actual_arrival_date", "Ngày đến thực tế", "date"),
+    FieldSpec("transport.net_weight_unit", "Đơn vị net weight", "text"),
+    FieldSpec("transport.incoterm_place", "Địa điểm theo Incoterms", "text"),
     FieldSpec("transport.waybill_no", "Số vận đơn", "text", critical=True),
     FieldSpec("transport.container_no", "Số container", "text", critical=True),
     FieldSpec("transport.container_count", "Số lượng container", "int"),
@@ -40,6 +59,11 @@ TRANSPORT_FIELDS = (
 )
 
 LINE_FIELDS = (
+    FieldSpec("line.sku", "Mã mặt hàng", "text"),
+    FieldSpec("line.seal_no", "Số seal của container ghi trên dòng", "text"),
+    FieldSpec("line.price_base_quantity", "Số đơn vị tính cho đơn giá", "decimal"),
+    FieldSpec("line.allowance_amount", "Giảm trừ dòng hàng", "decimal"),
+    FieldSpec("line.charge_amount", "Phụ phí dòng hàng", "decimal"),
     FieldSpec("line.no", "STT", "int"),
     FieldSpec("line.description", "Mô tả hàng", "text"),
     FieldSpec("line.spec", "Quy cách", "text"),
@@ -60,6 +84,9 @@ PARTY_FIELDS = (
     FieldSpec("party.shipper", "Người gửi hàng", "text"),
     FieldSpec("party.consignee", "Người nhận hàng", "text"),
     FieldSpec("party.notify", "Bên thông báo", "text"),
+    FieldSpec("party.exporter", "Người xuất khẩu", "text"),
+    FieldSpec("party.importer", "Người nhập khẩu", "text"),
+    FieldSpec("party.producer", "Nhà sản xuất", "text"),
 )
 
 # Per-role party attributes needed by a new customs draft: a company name alone is
@@ -71,6 +98,10 @@ PARTY_ATTRIBUTE_FIELDS = tuple(
         ("BUYER", "Bên mua"),
         ("SHIPPER", "Người gửi hàng"),
         ("CONSIGNEE", "Người nhận hàng"),
+        ("NOTIFY", "Bên thông báo"),
+        ("EXPORTER", "Người xuất khẩu"),
+        ("IMPORTER", "Người nhập khẩu"),
+        ("PRODUCER", "Nhà sản xuất"),
     )
     for attr, label, kind in (
         ("address", "Địa chỉ", "text"),
@@ -81,28 +112,39 @@ PARTY_ATTRIBUTE_FIELDS = tuple(
 )
 
 TOTAL_FIELDS = (
+    FieldSpec("totals.line_net_total", "Tổng thành tiền các dòng hàng", "decimal"),
+    FieldSpec("totals.tax_exclusive_amount", "Tổng trước thuế", "decimal"),
+    FieldSpec("totals.tax_inclusive_amount", "Tổng gồm thuế", "decimal"),
+    FieldSpec("totals.tax_amount", "Tiền thuế trên chứng từ", "decimal"),
+    FieldSpec("totals.allowance_amount", "Tổng giảm trừ cấp chứng từ", "decimal"),
+    FieldSpec("totals.charge_amount", "Tổng phụ phí cấp chứng từ", "decimal"),
     FieldSpec("totals.total_amount", "Tổng trị giá", "decimal", critical=True),
     FieldSpec("totals.currency", "Đồng tiền", "currency", critical=True),
 )
 
+GOODS_IDENTITY_FIELDS = tuple(
+    spec for spec in LINE_FIELDS
+    if spec.key not in {"line.unit_price", "line.amount", "line.currency", "line.price_base_quantity",
+                        "line.allowance_amount", "line.charge_amount"}
+)
+SHIPPING_FIELDS = COMMON_FIELDS + REFERENCE_FIELDS + TRANSPORT_FIELDS + PARTY_FIELDS + PARTY_ATTRIBUTE_FIELDS
+
 EXTRACTABLE_FIELDS: dict[str, tuple[FieldSpec, ...]] = {
-    "COMMERCIAL_INVOICE": COMMON_FIELDS + TRANSPORT_FIELDS + PARTY_FIELDS + PARTY_ATTRIBUTE_FIELDS + LINE_FIELDS + TOTAL_FIELDS,
-    "PACKING_LIST": COMMON_FIELDS + TRANSPORT_FIELDS + PARTY_ATTRIBUTE_FIELDS + LINE_FIELDS,
-    "TRANSPORT_DOCUMENT": COMMON_FIELDS + TRANSPORT_FIELDS + PARTY_FIELDS + PARTY_ATTRIBUTE_FIELDS,
-    "SALES_CONTRACT_PO": COMMON_FIELDS + PARTY_FIELDS + PARTY_ATTRIBUTE_FIELDS + LINE_FIELDS + TOTAL_FIELDS,
-    "ARRIVAL_NOTICE": COMMON_FIELDS + TRANSPORT_FIELDS + PARTY_ATTRIBUTE_FIELDS,
-    "SERVICE_CONTRACT": COMMON_FIELDS + PARTY_FIELDS + PARTY_ATTRIBUTE_FIELDS + TOTAL_FIELDS,
-    "EXPORT_DECLARATION": COMMON_FIELDS + TRANSPORT_FIELDS + PARTY_FIELDS + PARTY_ATTRIBUTE_FIELDS + TOTAL_FIELDS,
-    "CERTIFICATE_OF_ORIGIN": COMMON_FIELDS,
-    "INSURANCE_POLICY": COMMON_FIELDS + TOTAL_FIELDS,
-    "PHYTOSANITARY_CERTIFICATE": COMMON_FIELDS,
+    "COMMERCIAL_INVOICE": SHIPPING_FIELDS + LINE_FIELDS + TOTAL_FIELDS,
+    "PACKING_LIST": SHIPPING_FIELDS + LINE_FIELDS,
+    "TRANSPORT_DOCUMENT": SHIPPING_FIELDS + GOODS_IDENTITY_FIELDS,
+    "SALES_CONTRACT_PO": SHIPPING_FIELDS + LINE_FIELDS + TOTAL_FIELDS,
+    "ARRIVAL_NOTICE": SHIPPING_FIELDS + GOODS_IDENTITY_FIELDS,
+    "SERVICE_CONTRACT": COMMON_FIELDS + REFERENCE_FIELDS + PARTY_FIELDS + PARTY_ATTRIBUTE_FIELDS + TOTAL_FIELDS,
+    "EXPORT_DECLARATION": SHIPPING_FIELDS + LINE_FIELDS + TOTAL_FIELDS,
+    "CERTIFICATE_OF_ORIGIN": SHIPPING_FIELDS + GOODS_IDENTITY_FIELDS,
+    "INSURANCE_POLICY": SHIPPING_FIELDS + TOTAL_FIELDS,
+    "PHYTOSANITARY_CERTIFICATE": SHIPPING_FIELDS + GOODS_IDENTITY_FIELDS,
     "CUSTOMS_DECLARATION_SCAN": COMMON_FIELDS + PARTY_FIELDS + TOTAL_FIELDS,
     "OTHER": COMMON_FIELDS,
 }
 
 DOCUMENT_LEVEL_ONLY = {
-    "CERTIFICATE_OF_ORIGIN",
-    "PHYTOSANITARY_CERTIFICATE",
     "CUSTOMS_DECLARATION_SCAN",
     "OTHER",
 }

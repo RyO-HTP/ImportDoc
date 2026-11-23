@@ -35,6 +35,28 @@ DECLARATION_LINE_OFFSET = 1000
 GOODS_TAX_ENCODING = 100
 
 FIELD_TO_MODEL_ATTR = {
+    "reference.invoice_no": "invoice_ref_no",
+    "reference.invoice_date": "invoice_ref_date",
+    "reference.contract_no": "contract_ref_no",
+    "reference.origin_no": "origin_ref_no",
+    "reference.po_no": "po_no",
+    "transport.master_waybill_no": "master_waybill_no",
+    "transport.house_waybill_no": "house_waybill_no",
+    "transport.booking_no": "booking_no",
+    "transport.loading_port": "loading_port",
+    "transport.discharge_port": "discharge_port",
+    "transport.receipt_place": "receipt_place",
+    "transport.delivery_place": "delivery_place",
+    "transport.on_board_date": "on_board_date",
+    "transport.actual_arrival_date": "actual_arrival_date",
+    "transport.net_weight_unit": "net_weight_unit",
+    "transport.incoterm_place": "incoterm_place",
+    "totals.line_net_total": "line_net_total",
+    "totals.tax_exclusive_amount": "tax_exclusive_amount",
+    "totals.tax_inclusive_amount": "tax_inclusive_amount",
+    "totals.tax_amount": "tax_amount",
+    "totals.allowance_amount": "allowance_amount",
+    "totals.charge_amount": "charge_amount",
     "document.doc_number": "doc_number",
     "document.issue_date": "issue_date",
     "document.issuer": "issuer",
@@ -59,6 +81,12 @@ FIELD_TO_MODEL_ATTR = {
 }
 
 LINE_TO_MODEL_ATTR = {
+    "line.components": "components",
+    "line.sku": "sku",
+    "line.seal_no": "seal_no",
+    "line.price_base_quantity": "price_base_quantity",
+    "line.allowance_amount": "allowance_amount",
+    "line.charge_amount": "charge_amount",
     "line.description": "description",
     "line.spec": "spec",
     "line.hs_code": "hs_code",
@@ -106,7 +134,7 @@ def normalize_field_value(spec: FieldSpec, raw: str | None, locale: str | None) 
         return normalize_unit(raw), None
     if spec.kind == "int":
         num = parse_decimal(raw, locale)
-        return (str(int(num)) if num is not None else None), None
+        return (str(int(num)) if num is not None and num == num.to_integral_value() else None), None
     if spec.kind == "decimal":
         num = parse_decimal(raw, locale)
         if num is None:
@@ -119,15 +147,16 @@ def normalize_field_value(spec: FieldSpec, raw: str | None, locale: str | None) 
 class _QuoteValue:
     """Small adapter so party strings go through the same grounding path as field values."""
 
-    def __init__(self, value: str | None, quote: str | None = None):
+    def __init__(self, value: str | None, quote: str | None = None, cell_ref=None, bbox=None):
         self.value = value
         self.source_quote = quote
-        self.cell_ref = None
+        self.cell_ref = cell_ref
+        self.bbox = bbox
 
 
 IDENTIFIER_PATTERNS = {
     "transport.waybill_no": re.compile(r"^[A-Z0-9-]{8,20}$", re.I),
-    "transport.container_no": re.compile(r"^[A-Z]{4}\d{7}$", re.I),
+    "transport.container_no": re.compile(r"^[A-Z]{4}\d{7}(?:[,;/\n]+[A-Z]{4}\d{7})*$", re.I),
     "transport.seal_no": re.compile(r"^[A-Z0-9-]{4,20}$", re.I),
 }
 
@@ -316,7 +345,7 @@ class ExtractionService:
         if grid is not None:
             content = _grid_content(grid)
             result = await self.llm.complete_json_validated(
-                render_prompt(EXCEL_EXTRACT_PROMPT, doc_type=doc_type, content=content, limit="toàn bộ"),
+                render_prompt(EXCEL_EXTRACT_PROMPT, doc_type=doc_type, filename=filename, content=content),
                 "extraction",
                 None,
                 lambda data: ExtractionOut.model_validate(data),
@@ -377,7 +406,7 @@ class ExtractionService:
                 result = _strip_line_items(result)
             text_rows = self._rows_from_result(
                 specs, result, provenance="TEXT_LAYER", pages=pages, grid=None, path=path,
-                doc_type=doc_type, page=text_only[0],
+                doc_type=doc_type, page=text_only[0], text_indexes=text_only,
             )
             rows = _merge_evidence(rows, text_rows)
 
@@ -526,7 +555,7 @@ class ExtractionService:
                 rows,
                 self._rows_from_result(
                     specs, result, provenance="TEXT_LAYER", pages=pages, grid=None,
-                    path=path, doc_type=doc_type, page=text_only[0],
+                    path=path, doc_type=doc_type, page=text_only[0], text_indexes=text_only,
                 ),
             )
         # Per-page text call for TEXT_PLUS_VISION pages, so the row keeps its own page
@@ -713,20 +742,34 @@ class ExtractionService:
         path: Path,
         doc_type: str,
         page: int = 0,
+        text_indexes: list[int] | None = None,
     ) -> list[ExtractedRow]:
         rows: list[ExtractedRow] = []
         locale = result.number_locale
-        page_text = pages[page] if provenance == "TEXT_LAYER" and page < len(pages) else ""
-        words = None
-        page_size = None
-        if provenance == "TEXT_LAYER" and path.suffix.lower() == ".pdf" and page_text:
-            try:
-                words = extract_pdf_words(path, page)
-                with fitz.open(path) as doc:
-                    rect = doc[page].rect
-                    page_size = (rect.width, rect.height)
-            except Exception:
-                words, page_size = None, None
+        page_geometry = {}
+
+        def source(fv):
+            if provenance != "TEXT_LAYER":
+                grounding, bbox = self._ground(fv, provenance, "", None, None, grid)
+                return grounding, bbox, page + 1 if provenance == "IMAGE" else None
+            indexes = [index for index in text_indexes or [page] if index < len(pages)]
+            value_pages = [index for index in indexes if ground_quote(fv.value, pages[index])]
+            quote_pages = [index for index in indexes if ground_quote(fv.source_quote, pages[index])]
+            matches = [index for index in value_pages if index in quote_pages] or value_pages or quote_pages
+            if len(matches) == 1:
+                index = matches[0]
+                if index not in page_geometry:
+                    try:
+                        words = extract_pdf_words(path, index)
+                        with fitz.open(path) as doc:
+                            rect = doc[index].rect
+                        page_geometry[index] = words, (rect.width, rect.height)
+                    except (OSError, RuntimeError, ValueError):
+                        page_geometry[index] = None, None
+                words, size = page_geometry[index]
+                grounding, bbox = self._ground(fv, provenance, pages[index], words, size, grid)
+                return grounding, bbox, index + 1
+            return False, None, page + 1 if not text_indexes or len(text_indexes) == 1 else None
 
         for spec in specs:
             attr = FIELD_TO_MODEL_ATTR.get(spec.key)
@@ -734,14 +777,14 @@ class ExtractionService:
                 continue
             fv = getattr(result, attr)
             normalized, unit = normalize_field_value(spec, fv.value, locale)
-            grounding, bbox = self._ground(fv, provenance, page_text, words, page_size, grid)
+            grounding, bbox, source_page = source(fv)
             rows.append(
                 ExtractedRow(
                     field_key=spec.key,
                     raw_value=fv.value,
                     normalized_value=normalized,
                     unit=unit,
-                    page=page + 1 if (provenance == "TEXT_LAYER" or provenance == "IMAGE") else None,
+                    page=source_page,
                     bbox=bbox,
                     cell_ref=fv.cell_ref if provenance == "CELL" else None,
                     confidence=fv.confidence,
@@ -756,17 +799,16 @@ class ExtractionService:
         party_map = {f"party.{p.role.lower()}": p for p in result.parties if p.role and p.name}
         for field_key, party in party_map.items():
             spec = next((s for s in specs if s.key == field_key), FieldSpec(field_key, field_key, "text"))
-            quote = party.source_quote if hasattr(party, "source_quote") else None
-            grounding, bbox = self._ground(_QuoteValue(party.name, quote), provenance, page_text, words, page_size, grid)
+            grounding, bbox, source_page = source(_QuoteValue(party.name, party.source_quote, party.cell_ref, party.bbox))
             rows.append(
                 ExtractedRow(
                     field_key=field_key,
                     raw_value=party.name,
                     normalized_value=normalize_company(party.name),
                     unit=None,
-                    page=page + 1 if provenance in {"TEXT_LAYER", "IMAGE"} else None,
+                    page=source_page,
                     bbox=bbox,
-                    cell_ref=None,
+                    cell_ref=party.cell_ref if provenance == "CELL" else None,
                     confidence=None,
                     provenance_type=provenance,
                     grounding_verified=grounding,
@@ -780,21 +822,22 @@ class ExtractionService:
                 value = getattr(party, attr, None)
                 if not value:
                     continue
+                attr_grounded, attr_bbox, attr_page = source(_QuoteValue(value))
                 rows.append(
                     ExtractedRow(
                         field_key=f"party.{role}.{attr}",
                         raw_value=value,
                         normalized_value=normalize_company(value) if attr == "address" else str(value).strip(),
                         unit=None,
-                        page=page + 1 if provenance in {"TEXT_LAYER", "IMAGE"} else None,
-                        bbox=None,
+                        page=attr_page,
+                        bbox=attr_bbox,
                         cell_ref=None,
                         confidence=None,
                         provenance_type=provenance,
-                        grounding_verified=False,
+                        grounding_verified=attr_grounded,
                         review_status="NEEDS_REVIEW",
                         critical=False,
-                        evidence_state="EVIDENCE_LOCATED",
+                        evidence_state=self._evidence_state(provenance, attr_grounded),
                     )
                 )
 
@@ -806,14 +849,14 @@ class ExtractionService:
                     continue
                 fv = getattr(item, attr)
                 normalized, unit = normalize_field_value(spec, fv.value, locale)
-                grounding, bbox = self._ground(fv, provenance, page_text, words, page_size, grid)
+                grounding, bbox, source_page = source(fv)
                 rows.append(
                     ExtractedRow(
                         field_key=spec.key,
                         raw_value=fv.value,
                         normalized_value=normalized,
                         unit=unit,
-                        page=page + 1 if provenance in {"TEXT_LAYER", "IMAGE"} else None,
+                        page=source_page,
                         bbox=bbox,
                         cell_ref=fv.cell_ref if provenance == "CELL" else None,
                         confidence=fv.confidence,
@@ -839,16 +882,18 @@ class ExtractionService:
         if fv.value is None:
             return False, None
         if provenance == "TEXT_LAYER":
-            ok = ground_quote(fv.source_quote, page_text) or ground_quote(fv.value, page_text)
+            ok = ground_quote(fv.value, page_text)
             bbox = None
-            if ok and words and page_size:
-                raw = locate_quote(fv.source_quote, words) or locate_quote(fv.value, words)
+            if words and page_size:
+                raw = locate_quote(fv.value, words) or locate_quote(fv.source_quote, words)
                 bbox = normalize_bbox(raw, page_size[0], page_size[1])
             return ok, bbox
         if provenance == "CELL":
             if not fv.cell_ref or grid is None:
                 return False, None
             return _cell_contains(grid, fv.cell_ref, fv.value), None
+        if provenance == "IMAGE":
+            return False, getattr(fv, "bbox", None)
         return False, None
 
     def _review_status(self, spec: FieldSpec, provenance: str, grounding: bool, raw: str | None = None) -> str:
@@ -923,10 +968,10 @@ def _merge_evidence(primary: list[ExtractedRow], extra: list[ExtractedRow]) -> l
     same product are still two source rows.
     """
     rows = list(primary)
-    by_key: dict[str, list[ExtractedRow]] = {}
+    by_key: dict[tuple[str | None, str], list[ExtractedRow]] = {}
     for row in rows:
         if row.line_index is None and row.raw_value is not None:
-            by_key.setdefault(row.field_key, []).append(row)
+            by_key.setdefault((row.section_type, row.field_key), []).append(row)
     # Each extraction pass numbers its rows from 0. Merging two passes (two scanned
     # pages, or a bundle's invoice and packing sections) would otherwise collapse two
     # different rows into one LineItem, so give each source row a fresh document index.
@@ -981,10 +1026,11 @@ def _merge_evidence(primary: list[ExtractedRow], extra: list[ExtractedRow]) -> l
             continue
         if candidate.raw_value is None:
             continue
-        existing = by_key.get(candidate.field_key)
+        section_key = (candidate.section_type, candidate.field_key)
+        existing = by_key.get(section_key)
         if not existing:
             rows.append(candidate)
-            by_key[candidate.field_key] = [candidate]
+            by_key[section_key] = [candidate]
             continue
         same = next(
             (r for r in existing if (r.normalized_value or r.raw_value) == (candidate.normalized_value or candidate.raw_value)),
@@ -993,6 +1039,10 @@ def _merge_evidence(primary: list[ExtractedRow], extra: list[ExtractedRow]) -> l
         if same is not None:
             if candidate.grounding_verified and not same.grounding_verified:
                 same.grounding_verified = True
+                same.evidence_state = candidate.evidence_state
+                same.page = candidate.page
+                same.bbox = candidate.bbox
+            elif same.bbox is None and candidate.bbox is not None:
                 same.page = candidate.page
                 same.bbox = candidate.bbox
             if same.confidence is None:

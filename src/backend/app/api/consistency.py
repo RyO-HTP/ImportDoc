@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..audit import record_audit
-from ..deps import get_llm, get_session
+from ..deps import get_session
 from ..models import ConsistencyFinding, Shipment
 from ..services.consistency import consistency_report, dismiss_finding, run_consistency_check
 
@@ -29,10 +29,10 @@ async def get_consistency(shipment_id: int, session: AsyncSession = Depends(get_
 
 @router.post("/shipments/{shipment_id}/consistency/run")
 async def run_consistency(
-    shipment_id: int, session: AsyncSession = Depends(get_session), llm=Depends(get_llm)
+    shipment_id: int, session: AsyncSession = Depends(get_session)
 ) -> dict:
     await _require_shipment(session, shipment_id)
-    await run_consistency_check(session, llm, shipment_id)
+    await run_consistency_check(session, None, shipment_id)
     return await consistency_report(session, shipment_id)
 
 
