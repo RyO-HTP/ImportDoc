@@ -7,6 +7,7 @@ import logging
 import re
 from typing import Any
 
+import pymupdf
 from openai import AsyncOpenAI
 
 from ..config import LLMSettings
@@ -26,6 +27,8 @@ DEFAULT_OUTPUT_TOKENS = 64000
 MIN_OUTPUT_TOKENS = 8000
 REQUEST_TIMEOUT_SECONDS = 300.0
 REASONING_OVERHEAD_TOKENS = 6000
+AGRILINKS_SCAN_MODEL = "bioturing/deepseek-v4.1-flash"
+LARGE_SCAN_BYTES = 500_000
 
 
 def budget_for(field_count: int, has_line_items: bool) -> int:
@@ -73,7 +76,7 @@ class LLMClient:
             api_key=settings.api_key,
             base_url=settings.base_url,
             timeout=REQUEST_TIMEOUT_SECONDS,
-            max_retries=1,
+            max_retries=6,
         )
         self.capability = capability or "json_prompt"
 
@@ -125,6 +128,21 @@ class LLMClient:
             return {"type": "json_object"}
         return None
 
+    async def _stream_result(self, request: dict[str, Any]) -> tuple[str, str, str | None]:
+        content: list[str] = []
+        reasoning: list[str] = []
+        finish_reason = None
+        stream = await self.client.chat.completions.create(**request, stream=True)
+        async with stream:
+            async for chunk in stream:
+                if not chunk.choices:
+                    continue
+                choice = chunk.choices[0]
+                content.append(choice.delta.content or "")
+                reasoning.append(getattr(choice.delta, "reasoning_content", None) or "")
+                finish_reason = choice.finish_reason or finish_reason
+        return "".join(content), "".join(reasoning), finish_reason
+
     async def complete_json(
         self,
         prompt: str,
@@ -135,12 +153,23 @@ class LLMClient:
         model_override: str | None = None,
     ) -> dict[str, Any]:
         model = model_override or (self.settings.vision_model if image_png else self.settings.text_model)
+        stream_scan = model == AGRILINKS_SCAN_MODEL and bool(image_png and len(image_png) > LARGE_SCAN_BYTES)
         content: list[dict[str, Any]] | str
         if image_png:
-            b64 = base64.b64encode(image_png).decode("ascii")
+            image = image_png
+            media_type = "image/png"
+            if stream_scan:
+                # Compact JPEGs reduce upload time and SSE lets the gateway send output
+                # before a complete scan extraction is ready.
+                pixmap = pymupdf.Pixmap(image_png)
+                if pixmap.alpha:
+                    pixmap = pymupdf.Pixmap(pixmap, 0)
+                image = pixmap.tobytes("jpeg", jpg_quality=55)
+                media_type = "image/jpeg"
+            b64 = base64.b64encode(image).decode("ascii")
             content = [
                 {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{b64}"}},
             ]
         else:
             content = prompt
@@ -157,19 +186,21 @@ class LLMClient:
         if fmt:
             request["response_format"] = fmt
         try:
-            resp = await asyncio.wait_for(
-                self.client.chat.completions.create(**request),
-                timeout=REQUEST_TIMEOUT_SECONDS,
-            )
+            async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
+                if stream_scan:
+                    text, reasoning, finish_reason = await self._stream_result(request)
+                else:
+                    resp = await self.client.chat.completions.create(**request)
+                    choice = resp.choices[0] if resp.choices else None
+                    message = choice.message if choice else None
+                    text = (message.content or "") if message else ""
+                    reasoning = (getattr(message, "reasoning_content", None) or "") if message else ""
+                    finish_reason = choice.finish_reason if choice else None
         except asyncio.TimeoutError as exc:
             raise LLMTimeout(f"{model} không phản hồi trong {REQUEST_TIMEOUT_SECONDS:.0f}s") from exc
         except Exception as exc:
             raise LLMError(f"Gọi model thất bại: {exc}") from exc
-        choice = resp.choices[0] if resp.choices else None
-        message = choice.message if choice else None
-        text = (message.content if message else "") or ""
-        reasoning = getattr(message, "reasoning_content", None) or "" if message else ""
-        if choice is not None and choice.finish_reason == "length" and not text.strip():
+        if finish_reason == "length" and not text.strip():
             REASONING_MODELS.add(model)
             raise LLMTruncated(
                 f"Model {model} dùng hết {request['max_tokens']} token cho suy luận trước khi trả JSON "
@@ -182,7 +213,7 @@ class LLMClient:
                 log.warning(
                     "model %s returned no parseable JSON (finish=%s, reasoning=%s chars)",
                     model,
-                    getattr(choice, "finish_reason", None),
+                    finish_reason,
                     len(reasoning),
                 )
             raise

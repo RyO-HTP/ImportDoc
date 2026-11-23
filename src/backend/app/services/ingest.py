@@ -66,9 +66,15 @@ def render_pdf_page_png(path: Path, page_index: int, dpi: int = 150, max_bytes: 
         if page_index < 0 or page_index >= doc.page_count:
             raise IngestError(f"Trang {page_index} ngoài phạm vi")
         page = doc[page_index]
-        for attempt_dpi in (dpi, 110, 90, 72):
+        for attempt_dpi in dict.fromkeys(d for d in (dpi, 110, 90, 72) if d <= dpi):
             png = page.get_pixmap(dpi=attempt_dpi).tobytes("png")
-            if len(png) <= max_bytes or attempt_dpi == 72:
+            if len(png) <= max_bytes:
+                return png
+        # Scanned pages can exceed the byte budget even at 72 dpi in RGB.
+        # Try grayscale before reducing resolution further so small print stays legible.
+        for attempt_dpi in sorted({min(dpi, d) for d in (110, 90, 72, 60, 48, 36)}, reverse=True):
+            png = page.get_pixmap(dpi=attempt_dpi, colorspace=fitz.csGRAY).tobytes("png")
+            if len(png) <= max_bytes:
                 return png
         return png
     finally:

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from app.models import Document, ExtractedField, LineItem, Shipment
 from app.services.consistency import (
     CheckField,
@@ -102,6 +104,41 @@ async def test_grounded_finding_is_stored(db_session):
     assert finding["values"][0]["page"] == 1
     assert report["counts"] == {"error": 1, "warning": 0}
     assert report["run"]["status"] == "DONE"
+
+
+@pytest.mark.parametrize(
+    ("second_waybill", "second_container", "expected_errors"),
+    [
+        ("BILL002345", "MSCU7654321", 1),
+        ("bill-001345", "MSCU7654321", 0),
+        ("BILL002345", "mscu 1234567", 0),
+        ("BILL002345", None, 0),
+    ],
+)
+async def test_arrival_notice_shipment_identity(db_session, second_waybill, second_container, expected_errors):
+    shipment = Shipment(code="ARRIVALS")
+    db_session.add(shipment)
+    await db_session.flush()
+    first = await _doc(db_session, shipment.id, "ARRIVAL_NOTICE", "arrival-1.pdf")
+    second = await _doc(db_session, shipment.id, "ARRIVAL_NOTICE", "arrival-2.pdf")
+    shipment_id = shipment.id
+    await _field(db_session, first, "transport.waybill_no", "BILL001345")
+    await _field(db_session, first, "transport.container_no", "MSCU1234567, TLLU1234567")
+    await _field(db_session, second, "transport.waybill_no", second_waybill)
+    if second_container:
+        await _field(db_session, second, "transport.container_no", second_container)
+    await db_session.commit()
+
+    llm = StubLLM()
+    await run_consistency_check(db_session, llm, shipment_id)
+    report = await consistency_report(db_session, shipment_id)
+    assert report["counts"] == {"error": expected_errors, "warning": 0}
+    assert len(llm.calls) == 1 - expected_errors
+    if expected_errors:
+        finding, = report["findings"]
+        assert finding["category"] == "shipment_identity"
+        assert {value["filename"] for value in finding["values"]} == {first.filename, second.filename}
+        assert len(finding["values"]) == 4
 
 
 async def test_hallucinated_ids_and_single_document_findings_are_dropped(db_session):

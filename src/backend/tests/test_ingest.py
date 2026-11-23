@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from random import Random
 
+import pymupdf
 import pytest
 
 from app.services.constants import IngestError
@@ -9,6 +11,7 @@ from app.services.ingest import (
     compute_checksum,
     normalize_doc_type,
     parse_document,
+    render_pdf_page_png,
     validate_upload,
 )
 
@@ -55,11 +58,28 @@ def test_parse_arrival_notice_text_layer():
 
 
 def test_render_pdf_page_png_produces_png():
-    from app.services.ingest import render_pdf_page_png
-
     png = render_pdf_page_png(SAMPLE_INPUT / "CONTRACT DALIAN CHUNLING LS2628.pdf", 0, dpi=100)
     assert png[:8] == b"\x89PNG\r\n\x1a\n"
     assert len(png) > 1000
+
+
+def test_render_dense_scan_uses_grayscale_to_meet_image_budget(tmp_path):
+    size = 640
+    budget = 500_000
+    samples = Random(1).randbytes(size * size * 3)
+    scan = pymupdf.Pixmap(pymupdf.csRGB, size, size, samples, False)
+    path = tmp_path / "dense-scan.pdf"
+    with pymupdf.open() as document:
+        page = document.new_page(width=size, height=size)
+        page.insert_image(page.rect, pixmap=scan)
+        assert len(page.get_pixmap(dpi=72).tobytes("png")) > budget
+        document.save(path)
+
+    png = render_pdf_page_png(path, 0, max_bytes=budget)
+    rendered = pymupdf.Pixmap(png)
+    assert len(png) <= budget
+    assert rendered.width >= size
+    assert rendered.n == 1
 
 
 def test_parse_multi_page_pdf():

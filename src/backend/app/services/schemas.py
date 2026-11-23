@@ -105,8 +105,8 @@ class PartyOut(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _coerce(cls, data):
-        if isinstance(data, dict) and isinstance(data.get("name"), dict):
-            data = {**data, "name": data["name"].get("value")}
+        if isinstance(data, dict):
+            data = {k: (v.get("value") if isinstance(v, dict) else v) for k, v in data.items()}
         return data
 
     @field_validator("role")

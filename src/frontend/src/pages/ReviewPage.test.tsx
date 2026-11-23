@@ -120,6 +120,22 @@ function renderPage() {
 }
 
 describe("ReviewPage", () => {
+  it("shows a failed extraction status when the document timed out", async () => {
+    const first = extractions.documents[0];
+    const error = "Model không phản hồi trong 300s";
+    getExtractions.mockResolvedValue({
+      ...extractions,
+      documents: [{ ...first, document: { ...first.document, status: "FAILED", error }, fields: [] }],
+    });
+
+    renderPage();
+
+    const panel = await screen.findByRole("region", { name: "Giá trị trích xuất" });
+    expect(within(panel).getByText("Trích xuất thất bại")).toBeTruthy();
+    expect(within(panel).getByText(error)).toBeTruthy();
+    expect(within(panel).queryByText("Đã xử lý xong")).toBeNull();
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     getExtractions.mockResolvedValue(extractions);
