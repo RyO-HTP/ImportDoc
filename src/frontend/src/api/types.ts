@@ -200,18 +200,57 @@ export interface ConsistencyValue {
   bbox: number[] | null;
   cell_ref: string | null;
   field_key: string;
+  label?: string;
   value: string | null;
+  source_id?: string;
+  trusted?: boolean;
+  line?: number | null;
+}
+
+export type ConsistencyStatus = "MATCH" | "MISMATCH" | "MISSING" | "VERIFY";
+export type ConsistencySeverity = "ERROR" | "WARNING" | "INFO";
+
+export interface ConsistencySource {
+  id: string;
+  document_id: number;
+  section_id: number | null;
+  filename: string;
+  doc_type: string;
+  page: number | null;
+  status: string;
+}
+
+export interface ConsistencyGroup {
+  id: string;
+  status: "LINKED" | "UNLINKED";
+  documents: ConsistencySource[];
+  links: { left: string; right: string; signals: string[] }[];
+}
+
+export interface ConsistencyRule {
+  field_key: string;
+  label: string;
+  basis: string;
+  document_types: string[];
+  mismatch_risk: ConsistencySeverity;
+  expected_on: string[];
 }
 
 export interface ConsistencyFinding {
   id: number;
-  severity: "ERROR" | "WARNING";
+  severity: ConsistencySeverity;
   category: string;
   title: string;
   explanation: string;
   dismissed: boolean;
   dismiss_note: string | null;
   values: ConsistencyValue[];
+  status?: ConsistencyStatus;
+  field_key?: string;
+  recommendation?: string;
+  group_id?: string | null;
+  sources?: ConsistencySource[];
+  calculated_value?: string | null;
 }
 
 export interface ConsistencyRunInfo {
@@ -228,4 +267,7 @@ export interface ConsistencyReport {
   stale: boolean;
   findings: ConsistencyFinding[];
   counts: { error: number; warning: number };
+  status_counts?: Record<ConsistencyStatus, number>;
+  groups?: ConsistencyGroup[];
+  matrix?: ConsistencyRule[];
 }

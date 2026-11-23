@@ -112,4 +112,32 @@ describe("ConsistencyPanel", () => {
     renderPanel();
     expect(await screen.findByText(/Chứng từ đã thay đổi sau lần kiểm tra gần nhất/)).toBeTruthy();
   });
+
+  it("filters by outcome and keeps each A/B value linked to its PDF location", async () => {
+    const mismatch = report.findings[0];
+    const sources = mismatch.values.map((value) => ({
+      id: `${value.document_id}:0`, document_id: value.document_id, filename: value.filename,
+      doc_type: value.doc_type!, section_id: null, page: value.page, status: "EXTRACTED",
+    }));
+    const values = mismatch.values.map((value, index) => ({
+      ...value, source_id: sources[index].id, bbox: [0.1, 0.2, 0.3, 0.4], label: "Khối lượng",
+    }));
+    getConsistency.mockResolvedValue({
+      ...report,
+      status_counts: { MATCH: 0, MISMATCH: 1, MISSING: 1, VERIFY: 0 },
+      findings: [
+        { ...mismatch, status: "MISMATCH", sources, values, recommendation: "Đọc lại chứng từ gốc." },
+        { ...mismatch, id: 8, severity: "INFO", status: "MISSING", title: "Thiếu số seal", sources, values: [] },
+      ],
+    });
+    const onValueClick = renderPanel();
+    expect(await screen.findByText("Chứng từ A")).toBeTruthy();
+    expect(screen.getByText("Chứng từ B")).toBeTruthy();
+    expect(screen.getByText("Đọc lại chứng từ gốc.")).toBeTruthy();
+    fireEvent.click(screen.getByText("26040"));
+    expect(onValueClick).toHaveBeenCalledWith(values[1]);
+    fireEvent.click(screen.getByRole("button", { name: "Thiếu dữ liệu · 1" }));
+    expect(await screen.findByText("Thiếu số seal")).toBeTruthy();
+    expect(screen.queryByText("Gross lệch")).toBeNull();
+  });
 });

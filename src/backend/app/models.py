@@ -505,7 +505,7 @@ class Job(Base):
 
 
 class ConsistencyRun(Base):
-    """One cross-document consistency check of a shipment (LLM-assisted, warning only)."""
+    """One versioned cross-document check of a shipment's source evidence."""
 
     __tablename__ = "consistency_runs"
 
@@ -515,6 +515,7 @@ class ConsistencyRun(Base):
     input_hash: Mapped[str] = mapped_column(String(64))
     error: Mapped[str | None] = mapped_column(Text)
     finding_count: Mapped[int] = mapped_column(Integer, default=0)
+    details: Mapped[Any | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -529,9 +530,9 @@ class ConsistencyFinding(Base):
     title: Mapped[str] = mapped_column(String(512))
     explanation: Mapped[str] = mapped_column(Text, default="")
     field_ids: Mapped[Any] = mapped_column(JSON)
-    # [[document_id, field_key, line_seq], ...]: survives re-extraction (new field ids),
-    # so a dismissal follows the content rather than the row ids.
+    # Stable evidence identity and values keep dismissals across identical re-extractions.
     signature: Mapped[Any | None] = mapped_column(JSON)
+    details: Mapped[Any | None] = mapped_column(JSON)
     dismissed: Mapped[bool] = mapped_column(default=False)
     dismiss_note: Mapped[str | None] = mapped_column(Text)
     dismissed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

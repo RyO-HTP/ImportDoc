@@ -6,8 +6,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..audit import record_audit
 from ..models import Document, ExtractedField
 from .constants import EXCEL_EXT, IMAGE_EXT, PDF_EXT
+from .consistency_groups import container_numbers, identifiers
+from .consistency_matrix import TRANSPORT
 
-DUPLICATE_KEYS = ("transport.waybill_no", "transport.container_no", "document.doc_number")
+DUPLICATE_KEYS = ("transport.waybill_no", "transport.master_waybill_no", "transport.house_waybill_no",
+                  "transport.container_no", "document.doc_number")
 NON_UNIQUE_TYPES = {"CERTIFICATE_OF_ORIGIN", "PHYTOSANITARY_CERTIFICATE", "CUSTOMS_DECLARATION_SCAN", "OTHER"}
 
 
@@ -43,6 +46,18 @@ def _similar_type(a: str | None, b: str | None) -> bool:
     return a == b or a in NON_UNIQUE_TYPES or b in NON_UNIQUE_TYPES
 
 
+def distinct_transport_scope(a: dict[str, set[str]], b: dict[str, set[str]]) -> bool:
+    for key, parser in (
+        ("transport.waybill_no", identifiers), ("transport.house_waybill_no", identifiers),
+        ("transport.master_waybill_no", identifiers), ("transport.container_no", container_numbers),
+    ):
+        left = set().union(*(parser(v) for v in a.get(key, ())))
+        right = set().union(*(parser(v) for v in b.get(key, ())))
+        if left and right and left != right:
+            return True
+    return False
+
+
 async def detect_duplicates(session: AsyncSession, doc: Document) -> None:
     """Flag documents that plausibly describe the same instrument.
 
@@ -71,6 +86,8 @@ async def detect_duplicates(session: AsyncSession, doc: Document) -> None:
         if not other_keys:
             continue
         if not _similar_type(doc.doc_type, other.doc_type):
+            continue
+        if doc.doc_type in TRANSPORT and other.doc_type == doc.doc_type and distinct_transport_scope(doc_keys, other_keys):
             continue
 
         transport_match = bool(

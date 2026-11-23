@@ -8,9 +8,6 @@ from httpx import ASGITransport, AsyncClient
 from app.config import LLMSettings, Settings
 from app.main import create_app
 
-from .test_consistency import StubLLM
-
-
 def _settings(tmp_path: Path) -> Settings:
     return Settings(
         llm=LLMSettings(api_key="test", base_url="http://example.invalid/v1", text_model="sonya", vision_model="vision_sonya"),
@@ -25,11 +22,9 @@ async def ctx(tmp_path: Path):
 
     app = create_app(_settings(tmp_path))
     transport = ASGITransport(app=app)
-    llm = StubLLM()
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         async with app.router.lifespan_context(app):
-            deps_module._state["llm"] = llm
-            yield ac, llm
+            yield ac
     deps_module._state.clear()
 
 
@@ -49,8 +44,15 @@ async def _seed() -> dict[str, int]:
             )
             session.add(doc)
             await session.flush()
+            session.add_all([
+                ExtractedField(document_id=doc.id, field_key="transport.waybill_no",
+                               raw_value="BL000111", normalized_value="BL000111", page=1, grounding_verified=True),
+                ExtractedField(document_id=doc.id, field_key="transport.gross_weight_unit",
+                               raw_value="KG", normalized_value="KG", page=1, grounding_verified=True),
+            ])
             field = ExtractedField(
-                document_id=doc.id, field_key="transport.gross_weight_kg", raw_value=value, normalized_value=value, page=1
+                document_id=doc.id, field_key="transport.gross_weight_kg", raw_value=value, normalized_value=value,
+                page=1, grounding_verified=True
             )
             session.add(field)
             await session.flush()
@@ -58,28 +60,23 @@ async def _seed() -> dict[str, int]:
     return ids
 
 
-def _respond(llm: StubLLM, ids: dict[str, int]) -> None:
-    llm.response = {
-        "findings": [
-            {"severity": "ERROR", "category": "weight", "title": "Gross lệch", "explanation": "x", "field_ids": [ids["pl"], ids["bl"]]}
-        ]
-    }
-
-
 async def test_get_consistency_empty_shipment_returns_null_run(ctx):
-    client, _ = ctx
+    client = ctx
     sid = (await client.post("/api/v1/shipments", json={"code": "EMPTY"})).json()["id"]
     r = await client.get(f"/api/v1/shipments/{sid}/consistency")
     assert r.status_code == 200
-    assert r.json() == {"run": None, "stale": False, "findings": [], "counts": {"error": 0, "warning": 0}}
+    body = r.json()
+    assert body["run"] is None and not body["stale"] and body["findings"] == []
+    assert body["counts"] == {"error": 0, "warning": 0}
+    assert body["matrix"]
 
 
 async def test_run_then_dismiss(ctx):
-    client, llm = ctx
+    client = ctx
     ids = await _seed()
-    _respond(llm, ids)
     body = (await client.post(f"/api/v1/shipments/{ids['sid']}/consistency/run")).json()
     assert body["counts"] == {"error": 1, "warning": 0}
+    assert body["status_counts"]["MISMATCH"] == 1 and body["status_counts"]["MATCH"] > 0
     fid = body["findings"][0]["id"]
     r = await client.post(f"/api/v1/consistency-findings/{fid}/dismiss", json={"note": "đúng"})
     assert r.status_code == 200
@@ -90,20 +87,20 @@ async def test_run_then_dismiss(ctx):
     assert (await client.get(f"/api/v1/shipments/{ids['sid']}/consistency")).json() == body
 
 
-async def test_edited_field_triggers_new_llm_call(ctx):
-    client, llm = ctx
+async def test_edited_field_invalidates_cached_run(ctx):
+    client = ctx
     ids = await _seed()
-    await client.post(f"/api/v1/shipments/{ids['sid']}/consistency/run")
-    await client.post(f"/api/v1/shipments/{ids['sid']}/consistency/run")
-    assert len(llm.calls) == 1
+    url = f"/api/v1/shipments/{ids['sid']}/consistency"
+    run_id = (await client.post(f"{url}/run")).json()["run"]["id"]
+    assert (await client.post(f"{url}/run")).json()["run"]["id"] == run_id
     r = await client.patch(f"/api/v1/shipments/{ids['sid']}/fields/{ids['pl']}", json={"value": "26401"})
     assert r.status_code == 200
-    await client.post(f"/api/v1/shipments/{ids['sid']}/consistency/run")
-    assert len(llm.calls) == 2
+    assert (await client.get(url)).json()["stale"]
+    assert (await client.post(f"{url}/run")).json()["run"]["id"] != run_id
 
 
 async def test_unknown_ids_return_404(ctx):
-    client, _ = ctx
+    client = ctx
     assert (await client.get("/api/v1/shipments/9999/consistency")).status_code == 404
     assert (await client.post("/api/v1/shipments/9999/consistency/run")).status_code == 404
     assert (await client.post("/api/v1/consistency-findings/9999/dismiss", json={})).status_code == 404
