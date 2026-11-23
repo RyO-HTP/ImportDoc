@@ -413,6 +413,7 @@ class ExtractionService:
                 None,
                 lambda data: ExtractionOut.model_validate(data),
                 image_png=png,
+                max_tokens=budget_for(len(specs), not metadata_only),
             )
             if metadata_only:
                 result = _strip_line_items(result)
@@ -573,6 +574,7 @@ class ExtractionService:
                 None,
                 lambda data: ExtractionOut.model_validate(data),
                 image_png=png,
+                max_tokens=budget_for(len(specs), not metadata_only),
             )
             if metadata_only:
                 result = _strip_line_items(result)

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from random import Random
 from types import SimpleNamespace
 
+import pymupdf
 import pytest
 
 from app.config import LLMSettings
@@ -40,6 +42,38 @@ async def test_non_json_content_raises(monkeypatch):
     client = _client(monkeypatch, [choice])
     with pytest.raises(LLMError):
         await client.complete_json("prompt", "x", None)
+
+
+async def test_large_deepseek_scan_uses_compressed_jpeg_and_streams_json(monkeypatch):
+    client = _client(monkeypatch, [])
+    client.settings.vision_model = "bioturing/deepseek-v4.1-flash"
+    samples = Random(2).randbytes(500 * 500 * 3)
+    png = pymupdf.Pixmap(pymupdf.csRGB, 500, 500, samples, False).tobytes("png")
+    requests = []
+
+    class Stream:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def __aiter__(self):
+            for content, finish_reason in [('{"ok":', None), ('true}', "stop")]:
+                choice = SimpleNamespace(delta=SimpleNamespace(content=content), finish_reason=finish_reason)
+                yield SimpleNamespace(choices=[choice])
+
+    async def create(**kwargs):
+        requests.append(kwargs)
+        return Stream()
+
+    client.client.chat.completions.create = create
+    assert await client.complete_json("prompt", "extraction", image_png=png) == {"ok": True}
+    request, = requests
+    assert request["stream"] is True
+    url = request["messages"][1]["content"][1]["image_url"]["url"]
+    assert url.startswith("data:image/jpeg;base64,")
+    assert len(url) < len(png)
 
 
 async def test_default_output_budget_is_generous():

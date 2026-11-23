@@ -253,6 +253,8 @@ interface ExtractionViewerProps {
 function ExtractionViewer({ doc, selectedField, maximized = false, onToggleMaximize, onRowClick }: ExtractionViewerProps) {
   const rows = useMemo(() => (doc ? rowsForDocument(doc) : []), [doc]);
   const openCount = rows.filter((row) => reviewTone(row.field) === "red").length;
+  const failed = doc?.document.status === "FAILED";
+  const processing = doc?.document.status === "PROCESSING";
 
   return (
     <section
@@ -283,23 +285,30 @@ function ExtractionViewer({ doc, selectedField, maximized = false, onToggleMaxim
       </header>
 
       <div className="flex shrink-0 items-center gap-2 border-b border-divider px-3 py-1.5">
-        <LocalizedStatus tone={openCount > 0 ? "red" : "green"}>
-          {openCount > 0 ? `${openCount} cần xem lại` : "Đã xử lý xong"}
-        </LocalizedStatus>
+        {processing ? (
+          <span className="type-fine-print text-ink-48">Đang trích xuất…</span>
+        ) : doc ? (
+          <LocalizedStatus tone={failed || openCount > 0 ? "red" : "green"}>
+            {failed ? "Trích xuất thất bại" : openCount > 0 ? `${openCount} cần xem lại` : "Đã xử lý xong"}
+          </LocalizedStatus>
+        ) : null}
         <p className="type-fine-print min-w-0 flex-1 truncate text-right text-ink-48">
           {rows.length > 0 ? "Bấm một dòng để đánh dấu nguồn ở cột trái." : "Chứng từ này chưa có dữ liệu trích xuất."}
         </p>
       </div>
 
       <div className="min-h-0 flex-1 overflow-auto">
-        {doc && doc.document.error ? (
+        {doc?.document.error && !processing ? (
           <div className="px-4 py-3">
             <Callout tone="critical">{doc.document.error}</Callout>
           </div>
         ) : null}
         {rows.length === 0 ? (
           <div className="px-4 py-4">
-            <EmptyState title="Chưa có dữ liệu trích xuất" description="Chứng từ này chưa được trích xuất thành công." />
+            <EmptyState
+              title="Chưa có dữ liệu trích xuất"
+              description={processing ? "Kết quả sẽ có sau khi xử lý xong." : "Chứng từ này chưa được trích xuất thành công."}
+            />
           </div>
         ) : (
           <div className="px-4 pb-2">

@@ -2,9 +2,8 @@ from __future__ import annotations
 
 """Cross-document consistency check (kiểm tra chéo chứng từ).
 
-The documents of one shipment must agree with each other. This module asks the
-text model to point out values that disagree across documents and stores the
-answer as warnings. It never changes extracted data and never blocks an export.
+This module checks shipment identity before asking the text model to compare
+values across documents. Findings never change extracted data or block an export.
 
 Guard rails, because the model can invent problems:
 - the model only sees field ids + values we send, and must cite those ids;
@@ -15,8 +14,10 @@ Guard rails, because the model can invent problems:
 import hashlib
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from itertools import combinations
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -33,6 +34,10 @@ log = logging.getLogger("importdoc.consistency")
 ACTIVE_DOCUMENT_STATUS = "EXTRACTED"
 DEFAULT_BATCH_FIELDS = 400
 SEVERITY_ORDER = {"ERROR": 0, "WARNING": 1}
+CONSISTENCY_RULES_VERSION = 2
+WAYBILL_KEY = "transport.waybill_no"
+CONTAINER_KEYS = {"transport.container_no", "line.container_no"}
+CONTAINER_NUMBER = re.compile(r"(?<![A-Z0-9])[A-Z]{4}[\s-]*\d{7}(?![A-Z0-9])")
 
 
 @dataclass(frozen=True)
@@ -133,7 +138,44 @@ async def collect_fields(session: AsyncSession, shipment_id: int) -> list[CheckF
 
 def input_hash(fields: list[CheckField]) -> str:
     payload = [(f.id, f.document_id, f.doc_type, f.field_key, f.value) for f in fields]
-    return hashlib.sha256(json.dumps(payload, ensure_ascii=False).encode("utf-8")).hexdigest()
+    versioned_payload = [CONSISTENCY_RULES_VERSION, payload]
+    return hashlib.sha256(json.dumps(versioned_payload, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def arrival_notice_conflicts(fields: list[CheckField]) -> list[FindingOut]:
+    """Identify notices with both different waybills and distinct containers."""
+    waybills: dict[int, dict[str, int]] = {}
+    containers: dict[int, dict[str, int]] = {}
+    for f in fields:
+        if f.doc_type != "ARRIVAL_NOTICE":
+            continue
+        if f.field_key == WAYBILL_KEY and f.line_seq is None:
+            waybill = re.sub(r"[\s-]+", "", f.value.upper())
+            if re.fullmatch(r"[A-Z0-9]+", waybill) and any(c.isdigit() for c in waybill):
+                waybills.setdefault(f.document_id, {}).setdefault(waybill, f.id)
+        elif f.field_key in CONTAINER_KEYS:
+            for match in CONTAINER_NUMBER.finditer(f.value.upper()):
+                container = re.sub(r"[\s-]+", "", match.group())
+                containers.setdefault(f.document_id, {}).setdefault(container, f.id)
+
+    findings = []
+    for left, right in combinations(sorted(waybills.keys() & containers.keys()), 2):
+        if waybills[left].keys() & waybills[right].keys() or containers[left].keys() & containers[right].keys():
+            continue
+        findings.append(
+            FindingOut(
+                severity="ERROR",
+                category="shipment_identity",
+                title="Thông báo hàng đến thuộc các lô hàng khác nhau",
+                explanation="Hai thông báo có số vận đơn khác nhau và không có số container nào trùng. "
+                "Hãy đưa mỗi thông báo vào đúng hồ sơ lô hàng rồi kiểm tra lại.",
+                field_ids=sorted({
+                    *waybills[left].values(), *containers[left].values(),
+                    *waybills[right].values(), *containers[right].values(),
+                }),
+            )
+        )
+    return findings
 
 
 def build_batches(fields: list[CheckField], max_fields: int = DEFAULT_BATCH_FIELDS) -> list[list[CheckField]]:
@@ -212,8 +254,9 @@ def _prompt(batch: list[CheckField]) -> str:
         for f in batch
     ]
     return (
-        "Bạn là chuyên viên kiểm tra đối chiếu bộ chứng từ nhập khẩu của MỘT lô hàng. "
-        "Các chứng từ (Invoice, Packing List, B/L, Arrival Notice, Hợp đồng, C/O, ...) phải đồng nhất.\n"
+        "Bạn là chuyên viên kiểm tra đối chiếu bộ chứng từ nhập khẩu. "
+        "Bộ chứng từ có thể chứa tài liệu của nhiều lô hàng. "
+        "Nếu số vận đơn hoặc số container cho thấy có thể trộn lô, hãy báo nghi vấn và trích dẫn các trường đó.\n"
         "Dữ liệu là danh sách trường đã trích xuất; 'line' là số thứ tự dòng hàng (null = thông tin chung).\n"
         "Nhiệm vụ: tìm những chỗ CÙNG một thông tin (bên bán, bên mua, số B/L, số container, số seal, số kiện, "
         "trọng lượng net/gross, CBM, cảng xếp/dỡ, tàu/chuyến, số và ngày invoice, tiền tệ, tổng tiền, "
@@ -287,17 +330,18 @@ async def run_consistency_check(session: AsyncSession, llm, shipment_id: int, fo
         if latest is not None and latest.status == "DONE" and latest.input_hash == digest:
             return latest
 
-    if len({f.document_id for f in fields}) < 2:
+    fields_by_id = {f.id: f for f in fields}
+    identity_findings = arrival_notice_conflicts(fields)
+    if identity_findings or len({f.document_id for f in fields}) < 2:
         run = ConsistencyRun(shipment_id=shipment_id, status="DONE", input_hash=digest)
         session.add(run)
         await session.flush()
-        await _replace_findings(session, run, [])
+        await _replace_findings(session, run, identity_findings, fields_by_id)
         await session.commit()
         return run
 
     # End the read transaction too, so the later write does not upgrade a stale snapshot.
     await session.commit()
-    fields_by_id = {f.id: f for f in fields}
     collected: list[FindingOut] = []
     run = ConsistencyRun(shipment_id=shipment_id, status="DONE", input_hash=digest)
     try:
